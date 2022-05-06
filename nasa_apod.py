@@ -16,11 +16,11 @@ from pprint import PrettyPrinter
 pp = PrettyPrinter()
 
 def fetchAPOD( date ):
-  
-  with open('site.txt') as f:
+
+  with open('./site.txt') as f:
     site_data = f.read()
     site_data = ast.literal_eval(site_data)
-  
+
   URL_APOD = site_data['url']
   params = {
     'api_key' : site_data['key'],
@@ -35,7 +35,7 @@ def fetchAPOD( date ):
 def getDateNow():
   dt = datetime.datetime.now(pytz.timezone('US/Eastern'))
   datestr = str(dt.year) + '-' + str(dt.month) + '-'  + str(dt.day)
-  # datestr = str(2022) + '-' + str(2) + '-'  + str(10) # sample video 
+  #datestr = str(2022) + '-' + str(2) + '-'  + str(10) # sample
   return datestr
 
 
@@ -56,17 +56,17 @@ def main():
     #print("Image saved")
   except:
     try:
-        os.system('rm /tmp/videofile.mkv')
-        os.system('rm /tmp/videofile_320p.mp4')
-        os.system('youtube-dl '+ resp["url"] + ' -o /tmp/videofile.mkv')
+        os.system('rm /tmp/videofile*')
+        os.system('youtube-dl '+ resp["url"] + ' -o /tmp/videofile')
         #Refer: https://superuser.com/questions/547296/resizing-videos-with-ffmpeg-avconv-to-fit-into-static-sized-player/1136305#1136305
-        os.system('ffmpeg -i /tmp/videofile.mkv -vf scale=480:320:force_original_aspect_ratio=decrease:eval=frame,pad=480:320:-1:-1:color=black /tmp/videofile_320p.mp4')
+        os.system('ffmpeg -i /tmp/videofile* -vf scale=480:320:force_original_aspect_ratio=decrease:eval=frame,pad=480:320:-1:-1:color=black /tmp/videofile_320p.mp4')
         os.system('mplayer -x 480 -y 320 -nosound -vo fbdev:/dev/fb1 /tmp/videofile_320p.mp4')
     except:
         print("Unable to download video")
         os.system('youtube-dl -U') # try update the downloader 
         os.system('cat /dev/urandom > /dev/fb0')
   else:
+    os.system('pkill fbi')
     os.system('/usr/bin/fbi --autozoom --noverbose --vt 1 ' + temporary_file)
     im.close()
 
