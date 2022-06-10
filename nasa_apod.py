@@ -99,6 +99,9 @@ def main():
   sample_buffer = ['' for x in range(size)]
 
   device = evdev.InputDevice('/dev/input/event0')
+  
+  scheduler.configure()
+  scheduler.start()
 
   pattern_buffer = ['up', 'down']
 
