@@ -43,23 +43,23 @@ def getDateNow():
   return datestr
 
 
-@scheduler.scheduled_job('cron', day_of_week='mon-sun', hour=6)
+#@scheduler.scheduled_job('cron', day_of_week='mon-sun', hour=6)
 def fetchArtifact():
   global isVideo
   temporary_file = '/tmp/image.jpg'
 
   date = getDateNow()
   print (date)
-  
+
   pic_url = fetchAPOD(date)
   print (pic_url)
-  
+
   resp = json.loads(pic_url)
   print (resp["url"])
-  
+
   link = requests.get(resp["url"], stream=True).raw
   print (link)
-  
+
   try:
     im = Image.open(link)
     #print("Image open")
@@ -75,7 +75,7 @@ def fetchArtifact():
         isVideo = True
     except:
         print("Unable to download video")
-        os.system('youtube-dl -U') # try update the downloader 
+        os.system('youtube-dl -U') # try update the downloader
         os.system('cat /dev/urandom > /dev/fb0')
   else:
     os.system('pkill fbi')
@@ -86,8 +86,9 @@ def fetchArtifact():
 
 def displayCallback():
   if isVideo:
+    print("================== Replaying File ========================")
     os.system('mplayer -x 480 -y 320 -nosound -vo fbdev:/dev/fb1 /tmp/videofile_320p.mp4')
-
+    print("=================== Replay Done ==========================")
 
 def screenPressed(callback):
   callback()
@@ -99,8 +100,9 @@ def main():
   sample_buffer = ['' for x in range(size)]
 
   device = evdev.InputDevice('/dev/input/event0')
-  
-  scheduler.configure()
+
+  #scheduler.configure()
+  scheduler.add_job(fetchArtifact, 'cron', day_of_week = 'mon-sun', hour = 6, minute = 0)
   scheduler.start()
 
   pattern_buffer = ['up', 'down']
@@ -115,7 +117,7 @@ def main():
       sample_buffer.pop(size)
       # print(sample_buffer)
 
-      # Compare the two arrays to check touch 
+      # Compare the two arrays to detect screen contact
       param_a = lambda x, y: x and y
       param_b = map(lambda a, b: a == b, sample_buffer, pattern_buffer)
       if functools.reduce(param_a, param_b, True):
