@@ -131,4 +131,5 @@ dmypy.json
 # Others
 site.txt
 log.txt
-log.txt.bz2
+log.txt.bz2apod.service
+apod.service
