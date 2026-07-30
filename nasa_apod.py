@@ -7,6 +7,7 @@ import glob
 import time
 import json
 import pytz
+import shutil
 import signal
 import logging
 import argparse
@@ -41,6 +42,15 @@ isVideo = False
 video_process = None
 
 APOD_MIN_DATE = datetime.date(1995, 6, 16)   # first day APOD ever published
+
+REQUIRED_TOOLS = ['fbi', 'mplayer', 'ffmpeg', 'yt-dlp']
+
+
+def check_dependencies():
+    missing = [t for t in REQUIRED_TOOLS if shutil.which(t) is None]
+    if missing:
+        log.warning(f"Missing from PATH: {', '.join(missing)} -- related "
+                    f"functionality will silently fall back until installed")
 
 
 def valid_apod_date(value):
@@ -179,41 +189,52 @@ def start_video_loop(video_path):
 
 def try_play_video(video_url):
     """Download + transcode, then start it looping. Returns True only if
-    playback actually started."""
-    for old in glob.glob(VIDEO_RAW + '*'):
-        os.remove(old)
-    if os.path.exists(VIDEO_SCALED):
-        os.remove(VIDEO_SCALED)
+    playback actually started -- never raises, so a failure here always
+    falls through to the thumbnail instead of blowing up the whole fetch."""
+    try:
+        for old in glob.glob(VIDEO_RAW + '*'):
+            os.remove(old)
+        if os.path.exists(VIDEO_SCALED):
+            os.remove(VIDEO_SCALED)
 
-    if is_direct_video_url(video_url):
-        ext = os.path.splitext(video_url.split('?')[0])[1]
-        raw_file = VIDEO_RAW + ext
-        if not download_direct_video(video_url, raw_file):
-            return False
-    else:
-        dl = subprocess.run(['yt-dlp', video_url, '-o', VIDEO_RAW],
-                             capture_output=True, text=True, timeout=180)
-        if dl.returncode != 0:
-            log.error(f"yt-dlp failed: {dl.stderr.strip()[-500:]}")
+        if is_direct_video_url(video_url):
+            ext = os.path.splitext(video_url.split('?')[0])[1]
+            raw_file = VIDEO_RAW + ext
+            if not download_direct_video(video_url, raw_file):
+                return False
+        else:
+            dl = subprocess.run(
+                ['yt-dlp', '-f', 'bv*[height<=480]/bv*/b', video_url, '-o', VIDEO_RAW],
+                capture_output=True, text=True, timeout=180)
+            if dl.returncode != 0:
+                log.error(f"yt-dlp failed: {dl.stderr.strip()[-500:]}")
+                return False
+
+            downloaded = glob.glob(VIDEO_RAW + '*')
+            if not downloaded:
+                log.error("yt-dlp exited 0 but no file was written")
+                return False
+            raw_file = downloaded[0]
+
+        scale = subprocess.run([
+            'ffmpeg', '-y', '-i', raw_file,
+            '-vf', 'scale=480:320:force_original_aspect_ratio=decrease:eval=frame,pad=480:320:-1:-1:color=black',
+            '-c:v', 'libx264', '-preset', 'ultrafast',
+            VIDEO_SCALED
+        ], capture_output=True, text=True, timeout=240)
+        if scale.returncode != 0 or not os.path.exists(VIDEO_SCALED):
+            log.error(f"ffmpeg scaling failed: {scale.stderr.strip()[-500:]}")
             return False
 
-        downloaded = glob.glob(VIDEO_RAW + '*')
-        if not downloaded:
-            log.error("yt-dlp exited 0 but no file was written")
-            return False
-        raw_file = downloaded[0]
+        return start_video_loop(VIDEO_SCALED)
 
-    scale = subprocess.run([
-        'ffmpeg', '-y', '-i', raw_file,
-        '-vf', 'scale=480:320:force_original_aspect_ratio=decrease:eval=frame,pad=480:320:-1:-1:color=black',
-        VIDEO_SCALED
-    ], capture_output=True, text=True, timeout=120)
-    if scale.returncode != 0 or not os.path.exists(VIDEO_SCALED):
-        log.error(f"ffmpeg scaling failed: {scale.stderr.strip()[-500:]}")
+    except FileNotFoundError as e:
+        log.error(f"Required tool not found: {e.filename} -- install it, video will use "
+                  f"the thumbnail fallback until then")
         return False
-
-    play = start_video_loop(VIDEO_SCALED)
-    return play
+    except Exception as e:
+        log.error(f"Unexpected error in video pipeline: {e}")
+        return False
 
 
 def fetch_artifact(date=None):
@@ -287,13 +308,16 @@ def main():
     )
     args = parser.parse_args()
 
+    check_dependencies()
+
     if args.date:
         fetch_artifact(args.date)
         return 0
 
     log.info("Starting NASA APOD display service")
 
-    scheduler.add_job(fetch_artifact, 'cron', day_of_week='mon-sun', hour=6, minute=0)
+    scheduler.add_job(fetch_artifact, 'cron', day_of_week='mon-sun', hour=1, minute=0,
+                       timezone=pytz.timezone('US/Eastern'))
     scheduler.start()
 
     # Show something immediately on boot instead of waiting for the next 6am job.
