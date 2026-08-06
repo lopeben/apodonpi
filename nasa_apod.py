@@ -103,6 +103,8 @@ def display_image(url, out_path):
         r = requests.get(url, stream=True, timeout=30)
         r.raise_for_status()
         im = Image.open(r.raw)
+        if im.mode != 'RGB':
+            im = im.convert('RGB')
         im.save(out_path)
         im.close()
         return True
