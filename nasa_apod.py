@@ -113,6 +113,20 @@ def display_image(url, out_path):
         return False
 
 
+def display_first_working_image(urls, out_path):
+    """Try each candidate URL in order, skipping blanks/duplicates. NASA's
+    own metadata occasionally has a broken hdurl (wrong filename, 404)
+    while the plain url is fine -- so don't give up after just one try."""
+    tried = set()
+    for url in urls:
+        if not url or url in tried:
+            continue
+        tried.add(url)
+        if display_image(url, out_path):
+            return True
+    return False
+
+
 def show_on_screen(path):
     subprocess.run(['pkill', 'fbi'], check=False)
     subprocess.run(['/usr/bin/fbi', '--autozoom', '--noverbose', '--vt', '1', path], check=False)
@@ -270,25 +284,27 @@ def fetch_artifact(date=None):
 
     # media_type == 'image' (also the fallback for any unrecognized type)
     isVideo = False
-    image_url = resp.get('hdurl') or resp.get('url')
-    if image_url and display_image(image_url, TEMP_IMAGE):
+    if display_first_working_image([resp.get('hdurl'), resp.get('url')], TEMP_IMAGE):
         stop_video()
         show_on_screen(TEMP_IMAGE)
     else:
-        log.error("Image fetch/display failed; leaving previous frame on screen")
+        log.error("Image fetch/display failed (tried hdurl and url); leaving previous frame on screen")
 
 
-def startup_fetch(retries=5, delay=30):
-    """Systemd can start this unit before the network is up, so retry a
-    few times instead of giving up and leaving the screen blank."""
+def fetch_with_retries(retries=5, delay=30):
+    """Wraps fetch_artifact() with a more patient retry cycle than the
+    inner one in fetch_apod(). Used both at boot (systemd can start this
+    unit before the network is up) and for the daily cron job (which only
+    runs once a day -- worth being patient rather than silently skipping
+    a whole day over a transient DNS/network blip)."""
     for attempt in range(1, retries + 1):
         try:
             fetch_artifact()
             return
         except Exception as e:
-            log.error(f"Startup fetch attempt {attempt}/{retries} failed: {e}")
+            log.error(f"Fetch attempt {attempt}/{retries} failed: {e}")
             time.sleep(delay)
-    log.error("Startup fetch exhausted retries; will pick up at next scheduled run")
+    log.error("Exhausted retries; will pick up at next scheduled run")
 
 
 def display_callback():
@@ -318,12 +334,12 @@ def main():
 
     log.info("Starting NASA APOD display service")
 
-    scheduler.add_job(fetch_artifact, 'cron', day_of_week='mon-sun', hour=1, minute=0,
+    scheduler.add_job(fetch_with_retries, 'cron', day_of_week='mon-sun', hour=1, minute=0,
                        timezone=pytz.timezone('US/Eastern'))
     scheduler.start()
 
     # Show something immediately on boot instead of waiting for the next 6am job.
-    startup_fetch()
+    fetch_with_retries()
 
     try:
         device = evdev.InputDevice(TOUCH_DEVICE)
