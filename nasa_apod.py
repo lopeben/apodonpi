@@ -1,11 +1,10 @@
 #!/usr/bin/python3
 
 import os
+import re
 import sys
-import ast
 import glob
 import time
-import json
 import pytz
 import shutil
 import signal
@@ -16,6 +15,7 @@ import requests
 import datetime
 import functools
 import subprocess
+import urllib.parse
 
 from PIL import Image
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -45,6 +45,15 @@ APOD_MIN_DATE = datetime.date(1995, 6, 16)   # first day APOD ever published
 
 REQUIRED_TOOLS = ['fbi', 'mplayer', 'ffmpeg', 'yt-dlp']
 
+# NASA retired api.nasa.gov/planetary/apod's APOD data on 2026-09-29 (moved to
+# science.nasa.gov/apod; full shutdown of the old endpoint is scheduled for
+# 2026-12-01). The old endpoint still answers with HTTP 200 but silently
+# ignores the date param and always returns the same generic placeholder --
+# that's why every fetch started showing the same NASA logo image. This is
+# the new WordPress-REST-based replacement: no API key, no quota, but it's
+# keyed by path (YYMMDD), not by query params.
+APOD_BASE_URL = 'https://science.nasa.gov/wp-json/wp/v2/apod-basic'
+
 
 def check_dependencies():
     missing = [t for t in REQUIRED_TOOLS if shutil.which(t) is None]
@@ -66,23 +75,16 @@ def valid_apod_date(value):
     return d.strftime('%Y-%m-%d')   # normalize e.g. 2026-7-8 -> 2026-07-08 for the API
 
 
-def load_site_config():
-    with open('./site.txt') as f:
-        return ast.literal_eval(f.read())
-
-
 def fetch_apod(date, retries=3, backoff=5):
-    site_data = load_site_config()
-    params = {
-        'api_key': site_data['key'],
-        'date': date,
-        'hd': 'True',
-        'thumbs': 'True',   # ignored by the API when media_type == image, so always safe to send
-    }
+    """Fetch APOD metadata for one date (YYYY-MM-DD) from the new
+    science.nasa.gov API. It takes the date as part of the path, in a
+    2-digit YYMMDD format (2026-10-05 -> 261005), not as a query param."""
+    yymmdd = datetime.datetime.strptime(date, '%Y-%m-%d').strftime('%y%m%d')
+    url = f'{APOD_BASE_URL}/{yymmdd}'
     last_err = None
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.get(site_data['url'], params=params, timeout=30)
+            resp = requests.get(url, timeout=30)
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.RequestException as e:
@@ -96,6 +98,41 @@ def fetch_apod(date, retries=3, backoff=5):
 def get_date_now():
     dt = datetime.datetime.now(pytz.timezone('US/Eastern'))
     return dt.strftime('%Y-%m-%d')   # zero-padded, matches the API's required YYYY-MM-DD
+
+
+def resize_hdurl(url, width=960):
+    """In the new API, hdurl points at assets.science.nasa.gov, a dynamic
+    image CDN that understands w=/h=/fit=/crop= query params -- and the
+    hdurl NASA gives us already comes with its own w=/h=/crop= baked in,
+    sized for a full desktop display (e.g. w=4222&h=2817&crop=faces).
+    Layering a smaller w on top while leaving their h/crop alone would
+    fight the aspect ratio or crop oddly, so replace the query entirely
+    with just a width + fit=clip (scale down to that width, preserve
+    aspect, no cropping) instead of merging into what's there."""
+    if not url:
+        return url
+    parts = urllib.parse.urlsplit(url)
+    new_query = urllib.parse.urlencode({'w': width, 'fit': 'clip'})
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+
+
+VIDEO_HOSTS = ('youtube.com', 'youtu.be', 'vimeo.com')
+_HREF_RE = re.compile(r'href="([^"]+)"')
+
+
+def extract_video_url(explanation_html):
+    """Unlike the old API, video days here have no dedicated video URL field
+    at all -- hdurl is just a generic sitewide placeholder image, not
+    per-video. The actual video link (YouTube/Vimeo embed, or occasionally a
+    direct NASA-hosted file) has to be scraped out of the explanation
+    field's HTML, which is normally prose plus a credit line of <a href>
+    links. Prefer a link that looks like a video host or a direct video
+    file; fall back to the first link on the page if nothing matches."""
+    links = _HREF_RE.findall(explanation_html or '')
+    for link in links:
+        if any(host in link for host in VIDEO_HOSTS) or is_direct_video_url(link):
+            return link
+    return links[0] if links else None
 
 
 def display_image(url, out_path):
@@ -266,29 +303,38 @@ def fetch_artifact(date=None):
         return
 
     media_type = resp.get('media_type', 'image')
-    log.info(f"media_type={media_type} url={resp.get('url')}")
+    hdurl = resp.get('hdurl')
+    log.info(f"media_type={media_type} hdurl={hdurl}")
 
     if media_type == 'video':
-        if try_play_video(resp['url']):
+        # 'url' is now the article permalink page, not a playable link --
+        # the real video link has to be scraped out of the explanation HTML.
+        video_url = extract_video_url(resp.get('explanation'))
+        if video_url and try_play_video(video_url):
             isVideo = True
             return
-        log.warning("Video pipeline failed, falling back to thumbnail image")
+        if video_url:
+            log.warning("Video pipeline failed, falling back to placeholder image")
+        else:
+            log.warning("No video link found in explanation text, falling back to placeholder image")
         isVideo = False
-        thumb_url = resp.get('thumbnail_url')
-        if thumb_url and display_image(thumb_url, TEMP_IMAGE):
+        if hdurl and display_first_working_image([resize_hdurl(hdurl), hdurl], TEMP_IMAGE):
             stop_video()
             show_on_screen(TEMP_IMAGE)
         else:
-            log.error("No usable thumbnail either; leaving previous frame on screen")
+            log.error("No usable fallback image either; leaving previous frame on screen")
         return
 
-    # media_type == 'image' (also the fallback for any unrecognized type)
+    # media_type == 'image' (also the fallback for any unrecognized type).
+    # 'url' is now the article page, not an image, so hdurl is the only
+    # usable image field -- try a display-sized resize first, then the
+    # untouched original if that somehow fails.
     isVideo = False
-    if display_first_working_image([resp.get('hdurl'), resp.get('url')], TEMP_IMAGE):
+    if hdurl and display_first_working_image([resize_hdurl(hdurl), hdurl], TEMP_IMAGE):
         stop_video()
         show_on_screen(TEMP_IMAGE)
     else:
-        log.error("Image fetch/display failed (tried hdurl and url); leaving previous frame on screen")
+        log.error("Image fetch/display failed (hdurl missing or unreachable); leaving previous frame on screen")
 
 
 def fetch_with_retries(retries=5, delay=30):
